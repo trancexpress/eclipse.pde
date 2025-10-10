@@ -14,8 +14,6 @@
  *******************************************************************************/
 package org.eclipse.pde.internal.core;
 
-import static org.eclipse.pde.internal.core.DependencyManager.Options.INCLUDE_OPTIONAL_DEPENDENCIES;
-
 import java.io.File;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -26,7 +24,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
@@ -75,18 +72,16 @@ import aQute.bnd.osgi.Constants;
 class RequiredPluginsClasspathContainer {
 
 	@SuppressWarnings("nls")
-	private static final Set<String> JUNIT5_RUNTIME_PLUGINS = Set.of("org.junit", //
-			"junit-jupiter-engine", // BSN of the bundle from Maven-Central
-			"org.junit.jupiter.engine"); // BSN of the bundle from Eclipse-Orbit
-	@SuppressWarnings("nls")
 	private static final Set<String> JUNIT5_API_PLUGINS = Set.of( //
 			"junit-jupiter-api", // BSN of the bundle from Maven-Central
 			"org.junit.jupiter.api"); // BSN of the bundle from Eclipse-Orbit
 
+	private static final Comparator<BundleDescription> BUNDLE_VERSION = Comparator
+			.comparing(BundleDescription::getVersion);
+
 	private final IPluginModelBase fModel;
 	private final IBuild fBuild;
 
-	private List<BundleDescription> junit5RuntimeClosure;
 	private IClasspathEntry[] fEntries;
 	private boolean addImportedPackages;
 
@@ -575,20 +570,22 @@ class RequiredPluginsClasspathContainer {
 	 */
 	private void addJunit5RuntimeDependencies(Set<BundleDescription> added, List<IClasspathEntry> entries)
 			throws CoreException {
-		if (!containsJunit5Dependency(added)) {
+		Optional<BundleDescription> highestJunitBundle = getHighestJunitBundle(added);
+		if (highestJunitBundle.isEmpty()) {
+			return;
+		}
+		Set<BundleDescription> junitRequirements = DependencyManager
+				.findRequirementsClosure(List.of(highestJunitBundle.get()));
+		if (junitRequirements.isEmpty()) {
 			return;
 		}
 
-		if (junit5RuntimeClosure == null) {
-			junit5RuntimeClosure = collectJunit5RuntimeRequirements();
-		}
-
 		String id = fModel.getPluginBase().getId();
-		if (id != null && junit5RuntimeClosure.stream().map(BundleDescription::getSymbolicName).anyMatch(id::equals)) {
+		if (id != null && junitRequirements.stream().map(BundleDescription::getSymbolicName).anyMatch(id::equals)) {
 			return; // never extend the classpath of a junit bundle
 		}
 
-		for (BundleDescription desc : junit5RuntimeClosure) {
+		for (BundleDescription desc : junitRequirements) {
 			if (added.contains(desc)) {
 				continue; // bundle has explicit dependency
 			}
@@ -597,21 +594,6 @@ class RequiredPluginsClasspathContainer {
 			Map<BundleDescription, List<Rule>> rules = Map.of(desc, List.of());
 			addPlugin(desc, true, rules, entries);
 		}
-	}
-
-	private boolean containsJunit5Dependency(Collection<BundleDescription> dependencies) {
-		return dependencies.stream().map(BundleDescription::getSymbolicName).anyMatch(JUNIT5_API_PLUGINS::contains);
-	}
-
-	private static List<BundleDescription> collectJunit5RuntimeRequirements() {
-		List<BundleDescription> roots = JUNIT5_RUNTIME_PLUGINS.stream().map(PluginRegistry::findModel)
-				.filter(Objects::nonNull).filter(IPluginModelBase::isEnabled)
-				.map(IPluginModelBase::getBundleDescription).toList();
-		Set<BundleDescription> closure = DependencyManager.findRequirementsClosure(roots,
-				INCLUDE_OPTIONAL_DEPENDENCIES);
-		String systemBundleBSN = TargetPlatformHelper.getPDEState().getSystemBundle();
-		return closure.stream().filter(b -> !b.getSymbolicName().equals(systemBundleBSN))
-				.sorted(Comparator.comparing(BundleDescription::getSymbolicName)).toList();
 	}
 
 	private void addSecondaryDependencies(BundleDescription desc, Set<BundleDescription> added,
@@ -716,4 +698,7 @@ class RequiredPluginsClasspathContainer {
 		}
 	}
 
+	private static Optional<BundleDescription> getHighestJunitBundle(Collection<BundleDescription> bundles) {
+		return bundles.stream().filter(b -> JUNIT5_API_PLUGINS.contains(b.getSymbolicName())).max(BUNDLE_VERSION);
+	}
 }
