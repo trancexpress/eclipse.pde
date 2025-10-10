@@ -33,6 +33,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import org.eclipse.core.resources.IProject;
@@ -390,20 +391,19 @@ public class JUnitPluginLaunchConfigurationDelegate extends AbstractJavaLaunchCo
 		Set<String> requiredPlugins = new LinkedHashSet<>(
 				JUnitLaunchConfigurationDelegate.getRequiredJunitRuntimePlugins(configuration));
 
-		if (fAllBundles.containsKey("junit-platform-runner")) { //$NON-NLS-1$
-			// add launcher and jupiter.engine to support @RunWith(JUnitPlatform.class)
-			requiredPlugins.add("junit-platform-launcher"); //$NON-NLS-1$
-			requiredPlugins.add("junit-jupiter-engine"); //$NON-NLS-1$
-		}
-
-		Set<BundleDescription> addedRequirements = new HashSet<>();
+		Set<BundleDescription> addedRequirements = new LinkedHashSet<>();
 		addAbsentRequirements(requiredPlugins, addedRequirements);
+
+		if (requiredPlugins.contains(JUnitLaunchConfigurationDelegate.JUNIT5_RUNTIME_PLUGIN)
+				&& fAllBundles.containsKey("junit-platform-runner") //$NON-NLS-1$
+				|| fAllBundles.containsKey("org.junit.platform.runner")) { //$NON-NLS-1$
+			Set<BundleDescription> requirements = JUnitLaunchConfigurationDelegate.junit5PlatformRequirements();
+			addedRequirements.addAll(requirements);
+		}
 
 		Set<BundleDescription> requirementsOfRequirements = DependencyManager
 				.findRequirementsClosure(addedRequirements);
-		Set<String> rorIds = requirementsOfRequirements.stream().map(BundleDescription::getSymbolicName)
-				.collect(Collectors.toSet());
-		addAbsentRequirements(rorIds, null);
+		addAbsentRequirements(requirementsOfRequirements);
 	}
 
 	private void addAbsentRequirements(Collection<String> requirements, Set<BundleDescription> addedRequirements)
@@ -417,6 +417,18 @@ public class JUnitPluginLaunchConfigurationDelegate extends AbstractJavaLaunchCo
 				if (addedRequirements != null) {
 					addedRequirements.add(model.getBundleDescription());
 				}
+			}
+		}
+	}
+
+	private void addAbsentRequirements(Set<BundleDescription> toAdd) throws CoreException {
+		for (BundleDescription requirement : toAdd) {
+			String id = requirement.getSymbolicName();
+			List<IPluginModelBase> models = fAllBundles.computeIfAbsent(id, k -> new ArrayList<>());
+			if (models.stream().noneMatch(m -> m.getBundleDescription().isResolved())) {
+				IPluginModelBase model = findRequiredPluginInTargetOrHost(requirement);
+				models.add(model);
+				BundleLauncherHelper.addDefaultStartingBundle(fModels, model);
 			}
 		}
 	}
@@ -1086,7 +1098,21 @@ public class JUnitPluginLaunchConfigurationDelegate extends AbstractJavaLaunchCo
 	}
 
 	private IPluginModelBase findRequiredPluginInTargetOrHost(String id) throws CoreException {
-		IPluginModelBase model = PluginRegistry.findModel(id);
+		IPluginModelBase model = findRequiredPluginInTargetOrHost(id, () -> PluginRegistry.findModel(id));
+		return model;
+	}
+
+	private IPluginModelBase findRequiredPluginInTargetOrHost(BundleDescription bundleDescription)
+			throws CoreException {
+		String id = bundleDescription.getSymbolicName();
+		IPluginModelBase model = findRequiredPluginInTargetOrHost(id,
+				() -> PluginRegistry.findModel((org.osgi.resource.Resource) bundleDescription));
+		return model;
+	}
+
+	private IPluginModelBase findRequiredPluginInTargetOrHost(String id, Supplier<IPluginModelBase> findModel)
+			throws CoreException {
+		IPluginModelBase model = findModel.get();
 		if (model == null || !model.getBundleDescription().isResolved()) {
 			// prefer bundle from host over unresolved bundle from target
 			model = PDECore.getDefault().findPluginInHost(id);

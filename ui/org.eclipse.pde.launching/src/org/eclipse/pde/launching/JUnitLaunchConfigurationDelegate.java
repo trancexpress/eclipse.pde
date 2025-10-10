@@ -27,13 +27,13 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.stream.Collectors;
@@ -88,6 +88,7 @@ import org.eclipse.pde.internal.launching.launcher.LauncherUtils;
 import org.eclipse.pde.internal.launching.launcher.RequirementHelper;
 import org.eclipse.pde.internal.launching.launcher.VMHelper;
 import org.osgi.framework.Constants;
+import org.osgi.framework.VersionRange;
 
 /**
  * A launch delegate for launching JUnit Plug-in tests.
@@ -98,6 +99,11 @@ import org.osgi.framework.Constants;
  * @since 3.6
  */
 public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.launcher.JUnitLaunchConfigurationDelegate {
+
+	public static final String JUNIT4_RUNTIME_PLUGIN = "org.eclipse.jdt.junit4.runtime"; //$NON-NLS-1$
+	public static final String JUNIT5_RUNTIME_PLUGIN = "org.eclipse.jdt.junit5.runtime"; //$NON-NLS-1$
+
+	private static final VersionRange JUNIT5_VERSIONS = new VersionRange("[1, 5)"); //$NON-NLS-1$
 
 	static {
 		RequirementHelper.registerLaunchTypeRequirements("org.eclipse.pde.ui.JunitLaunchConfig", lc -> { //$NON-NLS-1$
@@ -393,14 +399,32 @@ public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.laun
 		return application;
 	}
 
-	private IPluginModelBase findRequiredPluginInTargetOrHost(String id) throws CoreException {
-		IPluginModelBase model = PluginRegistry.findModel(id);
+	private static IPluginModelBase findRequiredPluginInTargetOrHost(String id) throws CoreException {
+		IPluginModelBase model = findRequiredPluginInTargetOrHost(id, () -> PluginRegistry.findModel(id));
+		return model;
+	}
+
+	private static IPluginModelBase findRequiredPluginInTargetOrHost(String id, VersionRange versionRange) throws CoreException {
+		IPluginModelBase model = findRequiredPluginInTargetOrHost(id, () -> PluginRegistry.findModel(id, versionRange));
+		return model;
+	}
+
+	private static IPluginModelBase findRequiredPluginInTargetOrHost(BundleDescription bundleDescription) throws CoreException {
+		String id = bundleDescription.getSymbolicName();
+		IPluginModelBase model = findRequiredPluginInTargetOrHost(id, () -> PluginRegistry.findModel((org.osgi.resource.Resource) bundleDescription));
+		return model;
+	}
+
+	private static IPluginModelBase findRequiredPluginInTargetOrHost(String id, Supplier<IPluginModelBase> findModel) throws CoreException {
+		IPluginModelBase model = findModel.get();
 		if (model == null || !model.getBundleDescription().isResolved()) {
 			// prefer bundle from host over unresolved bundle from target
 			model = PDECore.getDefault().findPluginInHost(id);
 		}
 		if (model == null) {
-			abort(NLS.bind(PDEMessages.JUnitLaunchConfiguration_error_missingPlugin, id), null, IStatus.OK);
+			String message = NLS.bind(PDEMessages.JUnitLaunchConfiguration_error_missingPlugin, id);
+			Status error = new Status(IStatus.ERROR, IPDEConstants.PLUGIN_ID, IStatus.OK, message, null);
+			throw new CoreException(error);
 		}
 		return model;
 	}
@@ -559,19 +583,45 @@ public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.laun
 	}
 
 	private void addRequiredJunitRuntimePlugins(ILaunchConfiguration configuration) throws CoreException {
-		Set<String> requiredPlugins = new LinkedHashSet<>(getRequiredJunitRuntimePlugins(configuration));
-
-		if (fAllBundles.containsKey("junit-platform-runner") || fAllBundles.containsKey("org.junit.platform.runner")) { //$NON-NLS-1$ //$NON-NLS-2$
-			// add launcher and jupiter.engine to support @RunWith(JUnitPlatform.class)
-			requiredPlugins.add("junit-platform-launcher"); //$NON-NLS-1$
-			requiredPlugins.add("junit-jupiter-engine"); //$NON-NLS-1$
+		Collection<String> plugins = getRequiredJunitRuntimePlugins(configuration);
+		addPlugins(plugins);
+		if (plugins.contains(JUNIT5_RUNTIME_PLUGIN) &&
+				(fAllBundles.containsKey("junit-platform-runner") || fAllBundles.containsKey("org.junit.platform.runner"))) { //$NON-NLS-1$ //$NON-NLS-2$
+			Set<BundleDescription> descriptions = junit5PlatformRequirements();
+			Set<BundleDescription> junitRquirements = DependencyManager.findRequirementsClosure(descriptions);
+			addAbsentRequirements(junitRquirements);
 		}
-		Set<BundleDescription> addedRequirements = new HashSet<>();
+	}
+
+	/**
+	 * @noreference This method is not intended to be referenced by clients.
+	 * @return plugins required  by JUnit 5 platform bundle
+	 */
+	public static Set<BundleDescription> junit5PlatformRequirements() throws CoreException {
+		// add launcher and jupiter.engine to support @RunWith(JUnitPlatform.class)
+		String[] requiredPlugins = {
+			"junit-platform-launcher", //$NON-NLS-1$
+			"junit-jupiter-engine", //$NON-NLS-1$
+		};
+		Set<BundleDescription> descriptions = new LinkedHashSet<>();
+		for (String id : requiredPlugins) {
+			IPluginModelBase model = findRequiredPluginInTargetOrHost(id, JUNIT5_VERSIONS);
+			if (model != null) {
+				BundleDescription description = model.getBundleDescription();
+				descriptions.add(description);
+			}
+		}
+		return descriptions;
+	}
+
+	private void addPlugins(Collection<String> plugins) throws CoreException {
+		Set<String> requiredPlugins = new LinkedHashSet<>(plugins);
+
+		Set<BundleDescription> addedRequirements = new LinkedHashSet<>();
 		addAbsentRequirements(requiredPlugins, addedRequirements);
 
 		Set<BundleDescription> requirementsOfRequirements = DependencyManager.findRequirementsClosure(addedRequirements);
-		Set<String> rorIds = requirementsOfRequirements.stream().map(BundleDescription::getSymbolicName).collect(Collectors.toSet());
-		addAbsentRequirements(rorIds, null);
+		addAbsentRequirements(requirementsOfRequirements);
 	}
 
 	private void addAbsentRequirements(Collection<String> requirements, Set<BundleDescription> addedRequirements) throws CoreException {
@@ -584,6 +634,18 @@ public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.laun
 				if (addedRequirements != null) {
 					addedRequirements.add(model.getBundleDescription());
 				}
+			}
+		}
+	}
+
+	private void addAbsentRequirements(Set<BundleDescription> toAdd) throws CoreException {
+		for (BundleDescription requirement : toAdd) {
+			String id = requirement.getSymbolicName();
+			List<IPluginModelBase> models = fAllBundles.computeIfAbsent(id, k -> new ArrayList<>());
+			if (models.stream().noneMatch(m -> m.getBundleDescription().isResolved())) {
+				IPluginModelBase model = findRequiredPluginInTargetOrHost(requirement);
+				models.add(model);
+				BundleLauncherHelper.addDefaultStartingBundle(fModels, model);
 			}
 		}
 	}
@@ -603,9 +665,9 @@ public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.laun
 		plugins.add("org.eclipse.pde.junit.runtime"); //$NON-NLS-1$
 
 		if (org.eclipse.jdt.internal.junit.launcher.TestKindRegistry.JUNIT4_TEST_KIND_ID.equals(testKind.getId())) {
-			plugins.add("org.eclipse.jdt.junit4.runtime"); //$NON-NLS-1$
+			plugins.add(JUNIT4_RUNTIME_PLUGIN);
 		} else if (org.eclipse.jdt.internal.junit.launcher.TestKindRegistry.JUNIT5_TEST_KIND_ID.equals(testKind.getId())) {
-			plugins.add("org.eclipse.jdt.junit5.runtime"); //$NON-NLS-1$
+			plugins.add(JUNIT5_RUNTIME_PLUGIN);
 		}
 		return plugins;
 	}
