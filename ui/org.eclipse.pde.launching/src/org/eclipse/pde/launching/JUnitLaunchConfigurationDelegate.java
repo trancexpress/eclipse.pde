@@ -642,8 +642,17 @@ public class JUnitLaunchConfigurationDelegate extends org.eclipse.jdt.junit.laun
 		for (BundleDescription requirement : toAdd) {
 			String id = requirement.getSymbolicName();
 			List<IPluginModelBase> models = fAllBundles.computeIfAbsent(id, k -> new ArrayList<>());
-			if (models.stream().noneMatch(m -> m.getBundleDescription().isResolved())) {
+			boolean replace = !models.isEmpty() && models.stream().noneMatch(m -> m.getBundleDescription().getVersion().equals(requirement.getVersion()));
+			if (replace || models.stream().noneMatch(m -> m.getBundleDescription().isResolved())) {
 				IPluginModelBase model = findRequiredPluginInTargetOrHost(requirement);
+				if (replace) {
+					String startLevel = null;
+					for (IPluginModelBase m : models) {
+						startLevel = fModels.remove(m);
+					}
+					models.clear();
+					fModels.put(model, startLevel);
+				}
 				models.add(model);
 				BundleLauncherHelper.addDefaultStartingBundle(fModels, model);
 			}
